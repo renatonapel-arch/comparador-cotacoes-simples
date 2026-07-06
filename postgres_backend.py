@@ -67,11 +67,12 @@ def _ensure_schema() -> None:
             CREATE TABLE IF NOT EXISTS comparador_simples.compras_historico (
                 cod_produto TEXT NOT NULL,
                 cod_cadastro INTEGER NOT NULL,
+                cod_filial TEXT NOT NULL,
                 data_movto DATE NOT NULL,
                 num_docto INTEGER,
                 valor_unitario NUMERIC(14,4) NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                PRIMARY KEY (cod_produto, cod_cadastro)
+                PRIMARY KEY (cod_produto, cod_cadastro, cod_filial)
             );
             CREATE INDEX IF NOT EXISTS idx_compras_historico_produto
                 ON comparador_simples.compras_historico (cod_produto, data_movto DESC);
@@ -180,30 +181,54 @@ def match_produto_fuzzy(descricao: str, threshold: float = 0.55) -> dict | None:
     return {"cod_produto": (melhor[0] or "").strip(), "descricao": (melhor[1] or "").strip(), "score": round(score, 2)}
 
 
-def ultima_compra(cod_cadastro: int, cods_produto: list[str]) -> dict[str, dict]:
-    """Mesma lógica de dois níveis do satlbase.py: primeiro tenta no MESMO
-    fornecedor; se não achar, cai pro fallback de QUALQUER fornecedor
-    (marcado mesmo_fornecedor=False)."""
+def ultima_compra(cod_cadastro: int, cods_produto: list[str], cod_filial: str | None = None) -> dict[str, dict]:
+    """Última compra por produto, em 3 níveis (mesma lógica de satlbase.py):
+    1. mesmo fornecedor + mesma filial (ideal)
+    2. mesmo fornecedor, qualquer filial (fallback)
+    3. qualquer fornecedor, qualquer filial (fallback)"""
     if not cods_produto:
         return {}
     _ensure_schema()
     with _connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT cod_produto, data_movto, num_docto, valor_unitario
-            FROM comparador_simples.compras_historico
-            WHERE cod_cadastro = %s AND cod_produto = ANY(%s)
-            """,
-            (cod_cadastro, cods_produto),
-        )
-        out = {}
-        for cod_produto, data_movto, num_docto, valor_unitario in cur.fetchall():
-            out[cod_produto] = {
-                "data_movto": data_movto.strftime("%d/%m/%Y"),
-                "num_docto": num_docto,
-                "valor_unitario": float(valor_unitario),
-                "mesmo_fornecedor": True,
-            }
+        out: dict[str, dict] = {}
+
+        if cod_filial:
+            cur.execute(
+                """
+                SELECT cod_produto, data_movto, num_docto, valor_unitario
+                FROM comparador_simples.compras_historico
+                WHERE cod_cadastro = %s AND cod_filial = %s AND cod_produto = ANY(%s)
+                """,
+                (cod_cadastro, cod_filial, cods_produto),
+            )
+            for cod_produto, data_movto, num_docto, valor_unitario in cur.fetchall():
+                out[cod_produto] = {
+                    "data_movto": data_movto.strftime("%d/%m/%Y"),
+                    "num_docto": num_docto,
+                    "valor_unitario": float(valor_unitario),
+                    "mesmo_fornecedor": True,
+                    "mesma_filial": True,
+                }
+
+        faltantes = [c for c in cods_produto if c not in out]
+        if faltantes:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (cod_produto) cod_produto, data_movto, num_docto, valor_unitario
+                FROM comparador_simples.compras_historico
+                WHERE cod_cadastro = %s AND cod_produto = ANY(%s)
+                ORDER BY cod_produto, data_movto DESC
+                """,
+                (cod_cadastro, faltantes),
+            )
+            for cod_produto, data_movto, num_docto, valor_unitario in cur.fetchall():
+                out[cod_produto] = {
+                    "data_movto": data_movto.strftime("%d/%m/%Y"),
+                    "num_docto": num_docto,
+                    "valor_unitario": float(valor_unitario),
+                    "mesmo_fornecedor": True,
+                    "mesma_filial": not cod_filial,
+                }
 
         faltantes = [c for c in cods_produto if c not in out]
         if faltantes:
@@ -222,6 +247,7 @@ def ultima_compra(cod_cadastro: int, cods_produto: list[str]) -> dict[str, dict]
                     "num_docto": num_docto,
                     "valor_unitario": float(valor_unitario),
                     "mesmo_fornecedor": False,
+                    "mesma_filial": False,
                 }
         return out
 
@@ -294,9 +320,9 @@ def sync_upsert(payload: dict) -> dict:
                 cur,
                 """
                 INSERT INTO comparador_simples.compras_historico
-                    (cod_produto, cod_cadastro, data_movto, num_docto, valor_unitario, updated_at)
+                    (cod_produto, cod_cadastro, cod_filial, data_movto, num_docto, valor_unitario, updated_at)
                 VALUES %s
-                ON CONFLICT (cod_produto, cod_cadastro) DO UPDATE SET
+                ON CONFLICT (cod_produto, cod_cadastro, cod_filial) DO UPDATE SET
                     data_movto = EXCLUDED.data_movto,
                     num_docto = EXCLUDED.num_docto,
                     valor_unitario = EXCLUDED.valor_unitario,
@@ -304,10 +330,10 @@ def sync_upsert(payload: dict) -> dict:
                 WHERE EXCLUDED.data_movto >= comparador_simples.compras_historico.data_movto
                 """,
                 [
-                    (c["cod_produto"], c["cod_cadastro"], c["data_movto"], c["num_docto"], c["valor_unitario"])
+                    (c["cod_produto"], c["cod_cadastro"], c["cod_filial"], c["data_movto"], c["num_docto"], c["valor_unitario"])
                     for c in compras_historico
                 ],
-                template="(%s, %s, %s, %s, %s, now())",
+                template="(%s, %s, %s, %s, %s, %s, now())",
             )
             rows_upserted += len(compras_historico)
 

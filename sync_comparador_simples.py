@@ -53,16 +53,18 @@ def _connect_satlbase():
 
 
 def coletar_compras_historico(cur, meses: int = 24) -> list[dict]:
-    """Última compra por (produto, fornecedor) nos últimos N meses.
-    Prioriza Cod_docto='EC' em empate de data (canônico), mas aceita
-    QUALQUER tipo de entrada quando não há 'EC' — produto pode ter sido
+    """Última compra por (produto, fornecedor, filial) nos últimos N meses —
+    o preço pago varia por filial (negociação/frete diferente), então não dá
+    pra misturar. Prioriza Cod_docto='EC' em empate de data (canônico), mas
+    aceita QUALQUER tipo de entrada quando não há 'EC' — produto pode ter sido
     registrado só como AJE/PCR/NFX/AVC (ver CONTINUAR-AQUI.md, caso 108680)."""
     cur.execute(
         f"""
         ;WITH ultimas AS (
-            SELECT i.Cod_produto, e.Cod_cli_for, e.Data_movto, e.Num_docto, i.Valor_unitario,
+            SELECT i.Cod_produto, e.Cod_cli_for, LTRIM(RTRIM(e.Cod_filial)) AS Cod_filial,
+                   e.Data_movto, e.Num_docto, i.Valor_unitario,
                    ROW_NUMBER() OVER (
-                       PARTITION BY i.Cod_produto, e.Cod_cli_for
+                       PARTITION BY i.Cod_produto, e.Cod_cli_for, LTRIM(RTRIM(e.Cod_filial))
                        ORDER BY e.Data_movto DESC, CASE WHEN e.Cod_docto = 'EC' THEN 0 ELSE 1 END
                    ) AS rn
             FROM tbentradasitem i WITH (NOLOCK)
@@ -70,16 +72,18 @@ def coletar_compras_historico(cur, meses: int = 24) -> list[dict]:
             WHERE e.Data_movto >= DATEADD(month, -{meses}, GETDATE())
               AND i.Cod_produto IS NOT NULL AND LTRIM(RTRIM(i.Cod_produto)) <> ''
               AND i.Valor_unitario IS NOT NULL AND i.Valor_unitario > 0
+              AND LTRIM(RTRIM(e.Cod_filial)) <> ''
         )
-        SELECT LTRIM(RTRIM(Cod_produto)), Cod_cli_for, Data_movto, Num_docto, Valor_unitario
+        SELECT LTRIM(RTRIM(Cod_produto)), Cod_cli_for, Cod_filial, Data_movto, Num_docto, Valor_unitario
         FROM ultimas WHERE rn = 1
         """
     )
     out = []
-    for cod_produto, cod_cli_for, data_movto, num_docto, valor_unitario in cur.fetchall():
+    for cod_produto, cod_cli_for, cod_filial, data_movto, num_docto, valor_unitario in cur.fetchall():
         out.append({
             "cod_produto": cod_produto,
             "cod_cadastro": int(cod_cli_for),
+            "cod_filial": cod_filial,
             "data_movto": data_movto.strftime("%Y-%m-%d"),
             "num_docto": int(num_docto) if num_docto is not None else None,
             "valor_unitario": float(valor_unitario),

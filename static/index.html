@@ -146,7 +146,16 @@ Ex: 667E12*0.45  BENEFIT CLASSIC CX 12*0.45KG   6,00 CX   66,5137
 ..."></textarea>
     </div>
 
-    <button class="btn btn-primary mt-5 w-full justify-center" id="btnCompare" disabled>
+    <div class="mt-5">
+      <label for="filialSelect" class="text-[12.5px] font-semibold text-[var(--navy-900)] block mb-1.5">Filial que recebeu a cotação</label>
+      <select id="filialSelect" class="inp">
+        <option value="100">100 — Maringá (MGA)</option>
+        <option value="200">200 — Ponta Grossa (PTA)</option>
+        <option value="300">300 — Luís Eduardo Magalhães (LEM)</option>
+      </select>
+    </div>
+
+    <button class="btn btn-primary mt-4 w-full justify-center" id="btnCompare" disabled>
       <svg class="i"><use href="#i-search"/></svg>
       Comparar com a última compra
     </button>
@@ -326,6 +335,7 @@ btnCompare.addEventListener('click', async ()=>{
 
   const form = new FormData();
   form.append('modo', mode === 'file' ? 'arquivo' : 'texto');
+  form.append('filial', document.getElementById('filialSelect').value);
   if (mode === 'file') form.append('arquivo', selectedFile);
   else form.append('texto', pasteText.value);
 

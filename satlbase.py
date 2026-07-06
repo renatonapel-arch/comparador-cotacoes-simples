@@ -144,73 +144,79 @@ def match_produto_fuzzy(descricao: str, threshold: float = 0.55) -> dict | None:
     }
 
 
-def ultima_compra(cod_cadastro: int, cods_produto: list[str]) -> dict[str, dict]:
-    """Última compra por produto. Tenta primeiro no MESMO fornecedor identificado
-    (qualquer Cod_docto de entrada — não só 'EC': achamos caso real de produto
-    cuja única entrada estava registrada como 'AJE', e ficava de fora). Se não
-    achar nada desse fornecedor (produto nunca comprado dele, ou só comprado por
-    um cadastro antigo/descontinuado), cai pro fallback: última compra de
-    QUALQUER fornecedor — marcada como "mesmo_fornecedor: False" pro frontend
-    avisar que não é comparação com o mesmo vendedor."""
+def _buscar_ultimas(cur, cods_produto, cod_cadastro=None, cod_filial=None):
+    """Roda a query de última compra com os filtros dados (fornecedor e/ou
+    filial opcionais). Retorna dict cod_produto -> linha bruta."""
+    placeholders = ",".join("?" * len(cods_produto))
+    filtros = ["i.Cod_produto IN (" + placeholders + ")"]
+    params = list(cods_produto)
+    if cod_cadastro is not None:
+        filtros.append("e.Cod_cli_for = ?")
+        params.append(cod_cadastro)
+    if cod_filial is not None:
+        filtros.append("LTRIM(RTRIM(e.Cod_filial)) = ?")
+        params.append(cod_filial)
+    where = " AND ".join(filtros)
+    cur.execute(
+        f"""
+        ;WITH ultimas AS (
+            SELECT i.Cod_produto, e.Data_movto, e.Num_docto, i.Valor_unitario,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY i.Cod_produto
+                       ORDER BY e.Data_movto DESC, CASE WHEN e.Cod_docto = 'EC' THEN 0 ELSE 1 END
+                   ) AS rn
+            FROM tbentradasitem i WITH (NOLOCK)
+            INNER JOIN tbentradas e WITH (NOLOCK) ON e.Chave_fato = i.Chave_fato
+            WHERE {where}
+        )
+        SELECT Cod_produto, Data_movto, Num_docto, Valor_unitario
+        FROM ultimas WHERE rn <= 1
+        """,
+        params,
+    )
+    return {
+        str(cod_produto).strip(): {
+            "data_movto": data_movto.strftime("%d/%m/%Y"),
+            "num_docto": int(num_docto),
+            "valor_unitario": float(valor_unitario),
+        }
+        for cod_produto, data_movto, num_docto, valor_unitario in cur.fetchall()
+    }
+
+
+def ultima_compra(cod_cadastro: int, cods_produto: list[str], cod_filial: str | None = None) -> dict[str, dict]:
+    """Última compra por produto, em 3 níveis de confiança (qualquer Cod_docto
+    de entrada — não só 'EC': achamos caso real de produto cuja única entrada
+    estava registrada como 'AJE', e ficava de fora):
+    1. mesmo fornecedor + mesma filial (ideal — preço que ESSA filial pagou)
+    2. mesmo fornecedor, qualquer filial (fallback — filial nunca comprou dele)
+    3. qualquer fornecedor, qualquer filial (fallback — produto nunca comprado
+       desse fornecedor)
+    Cada resultado marca mesmo_fornecedor/mesma_filial pro frontend avisar
+    quando a comparação não é 1-pra-1."""
     if not cods_produto:
         return {}
     with _connect() as conn:
         cur = conn.cursor()
-        placeholders = ",".join("?" * len(cods_produto))
-        cur.execute(
-            f"""
-            ;WITH ultimas AS (
-                SELECT i.Cod_produto, e.Data_movto, e.Num_docto, i.Valor_unitario,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY i.Cod_produto
-                           ORDER BY e.Data_movto DESC, CASE WHEN e.Cod_docto = 'EC' THEN 0 ELSE 1 END
-                       ) AS rn
-                FROM tbentradasitem i WITH (NOLOCK)
-                INNER JOIN tbentradas e WITH (NOLOCK) ON e.Chave_fato = i.Chave_fato
-                WHERE e.Cod_cli_for = ? AND i.Cod_produto IN ({placeholders})
-            )
-            SELECT Cod_produto, Data_movto, Num_docto, Valor_unitario
-            FROM ultimas WHERE rn <= 1
-            """,
-            cod_cadastro,
-            *cods_produto,
-        )
-        out = {}
-        for cod_produto, data_movto, num_docto, valor_unitario in cur.fetchall():
-            out[str(cod_produto).strip()] = {
-                "data_movto": data_movto.strftime("%d/%m/%Y"),
-                "num_docto": int(num_docto),
-                "valor_unitario": float(valor_unitario),
-                "mesmo_fornecedor": True,
-            }
+        out: dict[str, dict] = {}
+
+        if cod_filial:
+            nivel1 = _buscar_ultimas(cur, cods_produto, cod_cadastro=cod_cadastro, cod_filial=cod_filial)
+            for cod_produto, linha in nivel1.items():
+                out[cod_produto] = {**linha, "mesmo_fornecedor": True, "mesma_filial": True}
 
         faltantes = [c for c in cods_produto if c not in out]
         if faltantes:
-            placeholders2 = ",".join("?" * len(faltantes))
-            cur.execute(
-                f"""
-                ;WITH ultimas AS (
-                    SELECT i.Cod_produto, e.Data_movto, e.Num_docto, i.Valor_unitario,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY i.Cod_produto
-                               ORDER BY e.Data_movto DESC, CASE WHEN e.Cod_docto = 'EC' THEN 0 ELSE 1 END
-                           ) AS rn
-                    FROM tbentradasitem i WITH (NOLOCK)
-                    INNER JOIN tbentradas e WITH (NOLOCK) ON e.Chave_fato = i.Chave_fato
-                    WHERE i.Cod_produto IN ({placeholders2})
-                )
-                SELECT Cod_produto, Data_movto, Num_docto, Valor_unitario
-                FROM ultimas WHERE rn <= 1
-                """,
-                *faltantes,
-            )
-            for cod_produto, data_movto, num_docto, valor_unitario in cur.fetchall():
-                out[str(cod_produto).strip()] = {
-                    "data_movto": data_movto.strftime("%d/%m/%Y"),
-                    "num_docto": int(num_docto),
-                    "valor_unitario": float(valor_unitario),
-                    "mesmo_fornecedor": False,
-                }
+            nivel2 = _buscar_ultimas(cur, faltantes, cod_cadastro=cod_cadastro)
+            for cod_produto, linha in nivel2.items():
+                out[cod_produto] = {**linha, "mesmo_fornecedor": True, "mesma_filial": not cod_filial}
+
+        faltantes = [c for c in cods_produto if c not in out]
+        if faltantes:
+            nivel3 = _buscar_ultimas(cur, faltantes)
+            for cod_produto, linha in nivel3.items():
+                out[cod_produto] = {**linha, "mesmo_fornecedor": False, "mesma_filial": False}
+
         return out
 
 

@@ -132,8 +132,13 @@ def _planilha_para_texto(conteudo: bytes, filename: str) -> str:
 
 def _doc_referencia(ultima: dict) -> str:
     ref = f"doc {ultima['num_docto']} · {ultima['data_movto']}"
+    avisos = []
     if not ultima.get("mesmo_fornecedor", True):
-        ref += " (outro fornecedor)"
+        avisos.append("outro fornecedor")
+    elif not ultima.get("mesma_filial", True):
+        avisos.append("outra filial")
+    if avisos:
+        ref += f" ({', '.join(avisos)})"
     return ref
 
 
@@ -168,6 +173,7 @@ def index():
 async def comparar(
     modo: str = Form(...),
     texto: str = Form(""),
+    filial: str = Form("100"),
     arquivo: UploadFile | None = None,
     _user: str | None = Depends(require_auth),
 ):
@@ -220,7 +226,7 @@ async def comparar(
     )
 
     cods_produto_ok = [v for v in mapa_codigo_para_produto.values()]
-    ultimas = db.ultima_compra(cod_cadastro, cods_produto_ok) if cod_cadastro and cods_produto_ok else {}
+    ultimas = db.ultima_compra(cod_cadastro, cods_produto_ok, filial) if cod_cadastro and cods_produto_ok else {}
     descricoes_sige = db.descricao_produto(cods_produto_ok) if cods_produto_ok else {}
 
     for item in itens_extraidos:
@@ -257,7 +263,7 @@ async def comparar(
             if fuzzy:
                 cod_produto = fuzzy["cod_produto"]
                 linha["match_status"] = "fuzzy"
-                ultima = db.ultima_compra(cod_cadastro, [cod_produto]).get(cod_produto)
+                ultima = db.ultima_compra(cod_cadastro, [cod_produto], filial).get(cod_produto)
                 descr = db.descricao_produto([cod_produto]).get(cod_produto)
                 if descr:
                     linha["produto"] = descr
