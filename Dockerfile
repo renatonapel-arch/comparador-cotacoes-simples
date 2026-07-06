@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+# Coolify checa a saúde do container rodando curl/wget DE DENTRO dele —
+# sem isso o container novo sempre fica "unhealthy" e o deploy volta pro antigo.
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY requirements-prod.txt .
