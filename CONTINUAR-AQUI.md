@@ -1,37 +1,62 @@
 # Comparador de Cotações — Versão Simples — CONTINUAR AQUI
 
-> **STATUS (06/07/2026): EM PRODUÇÃO — `https://comparador-simples.demos.napel.com.br`**
-> (Basic Auth: `napel`/`renato`, senhas em `~/.claude/.env` `COMPARADOR_SIMPLES_BASIC_*`).
-> Validado ponta a ponta com o PDF real da Alisul/Supra em produção — 100% igual
-> à tabela esperada (seção 4). Local continua funcionando em `http://127.0.0.1:9100`
-> (modo `satlbase`, ao vivo).
+> **STATUS (06/07/2026): EM PRODUÇÃO — embutido no Clavis via iframe**
+> (`Compras → Comparador de Cotações`, rota `/compras/comparador-cotacoes`).
+> App standalone em `https://comparador-simples.demos.napel.com.br` —
+> **sem Basic Auth**, autenticado por SSO (JWT do Clavis via postMessage).
+> Validado ponta a ponta em produção com JWT real: filial 100 traz preço
+> direto, filial 200/300 cai no fallback e avisa "(outra filial)". Local
+> continua em `http://127.0.0.1:9100` (modo `satlbase`, ao vivo, sem login).
 >
-> ## Arquitetura final (dual-mode)
+> ## Arquitetura final (dual-mode + SSO + filial)
 > - **Local (PC do Renato):** `COMPARADOR_DB=satlbase` (padrão) — consulta o
->   SATLBASE ao vivo via `satlbase.py`. Sem login.
+>   SATLBASE ao vivo via `satlbase.py`. Sem login, sem SSO.
 > - **Produção (VPS/Coolify):** `COMPARADOR_DB=postgres` — consulta o Postgres
 >   compartilhado do Clavis (schema `comparador_simples`, ver `schema.sql`) via
->   `postgres_backend.py`. Com Basic Auth.
+>   `postgres_backend.py`.
+> - **Auth em produção — padrão B2 iframe (igual Troca de Óleo):** `GET /` é
+>   público (só HTML/JS, sem dado sensível); a própria página faz `fetch('/health')`
+>   e, se `db_backend==postgres`, checa `window.self===window.top` — acesso
+>   direto (fora de iframe) redireciona pro Clavis. Dentro do iframe, pede o
+>   JWT do Clavis via `postMessage` e manda em `Authorization: Bearer` no
+>   `POST /comparar`, que valida com a mesma `CLAVIS_SECRET_KEY`/HS256 do
+>   backend do Clavis (`jose.jwt.decode`). Sem Basic Auth em produção hoje
+>   (env vars removidas do Coolify) — o mecanismo continua existindo em
+>   `_load_basic_auth_users()` como fallback legado se algum dia precisar.
+> - **Filial:** seletor na UI (100 Maringá / 200 Ponta Grossa / 300 LEM,
+>   default 100) — `ultima_compra()` casa em 3 níveis: (1) mesmo fornecedor +
+>   mesma filial, (2) mesmo fornecedor qualquer filial, (3) qualquer
+>   fornecedor qualquer filial. Cada nível marca `mesmo_fornecedor`/
+>   `mesma_filial`; UI mostra "(outra filial)"/"(outro fornecedor)" quando
+>   cai no fallback. SATLBASE tem 8 códigos de filial em compras (100/200/300
+>   dominantes + 202/302/700/900/800) — Renato decidiu tratar isolado, sem
+>   agrupar como no CMV/DRE (MGA=100+700+900 etc.).
 > - **Sync:** `sync_comparador_simples.py` roda no PC (pyodbc no SATLBASE),
->   junta `compras_historico` (24 meses, prioriza `Cod_docto='EC'` em empate mas
->   aceita qualquer tipo — ver caso 108680/AJE abaixo), `produto_fornecedor`,
->   `produtos`, `fornecedores` — e faz `POST /admin/sync-historico` (Bearer
->   token) no app de produção. Volumes: ~11k/5.4k/8.9k/1.1k linhas — trivial pro
->   Postgres compartilhado.
+>   junta `compras_historico` por (produto, fornecedor, filial) — 24 meses,
+>   prioriza `Cod_docto='EC'` em empate mas aceita qualquer tipo (ver caso
+>   108680/AJE abaixo) —, `produto_fornecedor`, `produtos`, `fornecedores` —
+>   e faz `POST /admin/sync-historico` (Bearer token) no app de produção.
+>   Volumes: ~18k/5.4k/8.9k/1.15k linhas — trivial pro Postgres compartilhado.
 > - **Repo:** [github.com/renatonapel-arch/comparador-cotacoes-simples](https://github.com/renatonapel-arch/comparador-cotacoes-simples)
 >   (público — necessário pro Coolify puxar sem SSH key, mesmo padrão de outros
->   apps standalone do Renato). **Cuidado: nunca commitar segredo aqui.**
+>   apps standalone do Renato). **Cuidado: nunca commitar segredo aqui** (já
+>   aconteceu uma vez com a senha do Postgres — ver "gotcha de segurança" abaixo).
 > - **Coolify:** projeto "Demos" (`evklhb0t35rw1a57qoycgez4`), app uuid
->   `wqbmqpyxcpc90h0vrgc0ntq6`, `health_check_path=/health` (não pode ser `/`,
->   que agora exige Basic Auth).
+>   `wqbmqpyxcpc90h0vrgc0ntq6`, `health_check_path=/health`. Dockerfile precisa
+>   ter `curl` instalado — Coolify roda o healthcheck via `docker exec`, não
+>   HTTP externo (gotcha que já derrubou um deploy, rollback silencioso pro
+>   container antigo).
+> - **Clavis (lado embutido):** `frontend/src/pages/compras/comparador-cotacoes/index.tsx`
+>   (iframe + postMessage), rota em `App.tsx`, item em `module.json`
+>   (`compras`). PRs #499 (link externo, revertido) → #500 (iframe/SSO, atual).
 >
 > ## Pendente
 > - **Task Scheduler do sync ainda NÃO criada** — `Register-ScheduledTask` com
 >   `LogonType S4U` exige elevação (UAC), Claude não consegue rodar sozinho.
 >   Rodar `criar-task-sync.ps1` desta pasta em PowerShell **como administrador**
 >   uma única vez (cria a task `ComparadorSimplesSyncSATLBASE`, a cada 6h,
->   invisível). Até isso rodar, o Postgres de produção só tem o snapshot inicial
->   (sincronizado manualmente em 06/07/2026 durante o teste).
+>   invisível). Até isso rodar, o Postgres de produção só tem o snapshot manual
+>   mais recente (resincronizado em 06/07/2026 após adicionar filial).
 >
 > ## Decisões que mudaram durante a implementação (não estavam previstas neste doc)
 > - **Extração por Gemini, não Claude/Anthropic** — `ANTHROPIC_API_KEY` está
