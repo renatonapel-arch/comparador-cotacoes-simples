@@ -1,10 +1,39 @@
 # Comparador de Cotações — Versão Simples — CONTINUAR AQUI
 
-> **STATUS (06/07/2026): app funcional e validado ponta a ponta com o PDF real da
-> Alisul/Supra (seção 4) — resultado bateu 100% com a tabela esperada, nos dois
-> modos (arquivo e texto colado). Rodando em `http://127.0.0.1:9100`.**
+> **STATUS (06/07/2026): EM PRODUÇÃO — `https://comparador-simples.demos.napel.com.br`**
+> (Basic Auth: `napel`/`renato`, senhas em `~/.claude/.env` `COMPARADOR_SIMPLES_BASIC_*`).
+> Validado ponta a ponta com o PDF real da Alisul/Supra em produção — 100% igual
+> à tabela esperada (seção 4). Local continua funcionando em `http://127.0.0.1:9100`
+> (modo `satlbase`, ao vivo).
 >
-> Decisões que mudaram durante a implementação (não estavam previstas neste doc):
+> ## Arquitetura final (dual-mode)
+> - **Local (PC do Renato):** `COMPARADOR_DB=satlbase` (padrão) — consulta o
+>   SATLBASE ao vivo via `satlbase.py`. Sem login.
+> - **Produção (VPS/Coolify):** `COMPARADOR_DB=postgres` — consulta o Postgres
+>   compartilhado do Clavis (schema `comparador_simples`, ver `schema.sql`) via
+>   `postgres_backend.py`. Com Basic Auth.
+> - **Sync:** `sync_comparador_simples.py` roda no PC (pyodbc no SATLBASE),
+>   junta `compras_historico` (24 meses, prioriza `Cod_docto='EC'` em empate mas
+>   aceita qualquer tipo — ver caso 108680/AJE abaixo), `produto_fornecedor`,
+>   `produtos`, `fornecedores` — e faz `POST /admin/sync-historico` (Bearer
+>   token) no app de produção. Volumes: ~11k/5.4k/8.9k/1.1k linhas — trivial pro
+>   Postgres compartilhado.
+> - **Repo:** [github.com/renatonapel-arch/comparador-cotacoes-simples](https://github.com/renatonapel-arch/comparador-cotacoes-simples)
+>   (público — necessário pro Coolify puxar sem SSH key, mesmo padrão de outros
+>   apps standalone do Renato). **Cuidado: nunca commitar segredo aqui.**
+> - **Coolify:** projeto "Demos" (`evklhb0t35rw1a57qoycgez4`), app uuid
+>   `wqbmqpyxcpc90h0vrgc0ntq6`, `health_check_path=/health` (não pode ser `/`,
+>   que agora exige Basic Auth).
+>
+> ## Pendente
+> - **Task Scheduler do sync ainda NÃO criada** — `Register-ScheduledTask` com
+>   `LogonType S4U` exige elevação (UAC), Claude não consegue rodar sozinho.
+>   Rodar `criar-task-sync.ps1` desta pasta em PowerShell **como administrador**
+>   uma única vez (cria a task `ComparadorSimplesSyncSATLBASE`, a cada 6h,
+>   invisível). Até isso rodar, o Postgres de produção só tem o snapshot inicial
+>   (sincronizado manualmente em 06/07/2026 durante o teste).
+>
+> ## Decisões que mudaram durante a implementação (não estavam previstas neste doc)
 > - **Extração por Gemini, não Claude/Anthropic** — `ANTHROPIC_API_KEY` está
 >   revogada desde 06/2026 (vazamento). Padrão Napel atual pra visão é Gemini
 >   (`gemini-2.5-flash`, REST puro via `httpx`, igual ao
@@ -20,14 +49,21 @@
 >   validado com query real) — não foi preciso o fallback PowerShell/.NET.
 > - Stack final: **FastAPI** (não `http.server` puro) por causa do multipart de
 >   upload — Opção A da seção 7, como já era esperado.
->
-> Arquivos: `app.py` (rotas + orquestração), `extracao.py` (Gemini), `satlbase.py`
-> (SATLBASE), `static/index.html` (frontend, igual ao mockup + fetch real).
-> `requirements.txt` criado. Pra rodar: `python app.py` (porta 9100, registrada
-> em `portas-demos.json`).
->
-> Pendente (fora de escopo, ver seção 9 original): persistência/histórico, deploy
-> em VPS. Rodar local por enquanto.
+> - **Última compra: prioriza `Cod_docto='EC'` mas não exige** — produto 108680
+>   só tinha registro como `AJE` (de OUTRO fornecedor, cadastro 565, não o
+>   Alisul/46309). `ultima_compra()` tenta primeiro no MESMO fornecedor
+>   (qualquer tipo de doc, EC como desempate), e se não achar nada cai pro
+>   fallback de QUALQUER fornecedor (marcado `mesmo_fornecedor: false`, mostrado
+>   como "(outro fornecedor)" na UI).
+> - **Gotcha de segurança:** achei a senha do Postgres de produção hardcoded
+>   como default em `postgres_backend.py` antes de tornar o repo público —
+>   removida do histórico do git via `commit --amend` + `force-push` (repo tinha
+>   1 commit só, sem colaboradores). Ficou só `os.environ["COMPARADOR_DATABASE_URL"]`,
+>   sem fallback. Também achei que o Coolify grava TODOS os env vars da app como
+>   `ARG` no Dockerfile final (visível em `docker history` da imagem) — parece
+>   ser comportamento padrão da instância pra build_pack=dockerfile, não uma
+>   config que eu tenha errado; mesmo padrão dos outros apps do Renato nesse
+>   Coolify. Imagem não é publicada em registry externo, fica só local na VPS.
 
 ---
 
