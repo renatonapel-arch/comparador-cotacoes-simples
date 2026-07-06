@@ -213,6 +213,25 @@ Ex: 667E12*0.45  BENEFIT CLASSIC CX 12*0.45KG   6,00 CX   66,5137
 </main>
 
 <script>
+// ---- SSO Clavis (só em produção — modo satlbase local continua sem login) ----
+// Mesmo padrão do Troca de Óleo: acesso direto (fora de iframe) manda pro Clavis;
+// dentro do iframe, pede o JWT por postMessage e usa em Authorization: Bearer.
+const CLAVIS_ORIGIN = 'https://clavis.napel.com.br';
+let ssoToken = null;
+
+fetch('/health').then(r => r.json()).then(h => {
+  if (h.db_backend !== 'postgres') return; // local: sem SSO
+  if (window.self === window.top) {
+    window.location.href = CLAVIS_ORIGIN + '/compras/comparador-cotacoes';
+    return;
+  }
+  window.addEventListener('message', ev => {
+    if (ev.origin !== CLAVIS_ORIGIN) return;
+    if (ev.data && ev.data.type === 'clavis-sso-token') ssoToken = ev.data.token || null;
+  });
+  window.parent.postMessage({ type: 'clavis-sso-request' }, CLAVIS_ORIGIN);
+}).catch(() => {});
+
 const brl = v => (v === null || v === undefined) ? '—' : v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 
 function verdictBadge(linha){
@@ -311,7 +330,8 @@ btnCompare.addEventListener('click', async ()=>{
   else form.append('texto', pasteText.value);
 
   try {
-    const resp = await fetch('/comparar', { method: 'POST', body: form });
+    const headers = ssoToken ? { 'Authorization': 'Bearer ' + ssoToken } : {};
+    const resp = await fetch('/comparar', { method: 'POST', body: form, headers });
     const data = await resp.json();
     clearInterval(iv);
     loadingCard.classList.add('hidden');

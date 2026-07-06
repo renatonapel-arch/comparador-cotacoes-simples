@@ -10,8 +10,12 @@ Dois modos de backend de dados (ver CONTINUAR-AQUI.md):
   consulta o Postgres compartilhado do Clavis via postgres_backend.py,
   alimentado pelo sync_comparador_simples.py (roda no PC, a cada 6h).
 
-Em produção (COMPARADOR_DB=postgres) a app exige Basic Auth em tudo, exceto
-/health e /version. Local (satlbase) roda sem login por padrão.
+Em produção (COMPARADOR_DB=postgres), embutido via iframe no Clavis (SSO):
+GET / é público (só HTML/JS estático, sem dado sensível) — a página checa
+window.top e redireciona pro Clavis se acessada direto, fora do iframe. A
+rota que importa (/comparar) exige um JWT do Clavis (Authorization: Bearer,
+mesma CLAVIS_SECRET_KEY/HS256) OU Basic Auth como fallback legado. Local
+(satlbase) roda sem login, como sempre.
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
+from jose import JWTError, jwt as jose_jwt
 
 import extracao
 
@@ -60,11 +65,37 @@ def _load_basic_auth_users() -> dict[str, str]:
     return users
 
 
-def require_auth(credentials: HTTPBasicCredentials | None = Depends(_basic)):
-    """Só exige login quando BASIC_AUTH_USER estiver configurado (produção).
-    Uso local (sem essas env vars) continua livre, como sempre foi."""
+def _verify_clavis_jwt(token: str) -> str | None:
+    """Valida o JWT emitido pelo Clavis (mesma SECRET_KEY, HS256). Retorna o
+    email do usuário se válido, senão None."""
+    secret = os.environ.get("CLAVIS_SECRET_KEY")
+    if not secret:
+        return None
+    try:
+        payload = jose_jwt.decode(token, secret, algorithms=["HS256"])
+        return payload.get("email")
+    except JWTError:
+        return None
+
+
+def require_auth(
+    request: Request,
+    credentials: HTTPBasicCredentials | None = Depends(_basic),
+):
+    """Ordem: (1) JWT do Clavis via Authorization: Bearer (SSO, iframe) —
+    (2) Basic Auth, se configurado (fallback legado / uso direto) — (3) sem
+    gate nenhum, se nada estiver configurado (dev local)."""
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        user = _verify_clavis_jwt(auth_header[7:])
+        if user:
+            return user
+        raise HTTPException(status_code=401, detail="token Clavis inválido")
+
     users = _load_basic_auth_users()
     if not users:
+        if os.environ.get("CLAVIS_SECRET_KEY"):
+            raise HTTPException(status_code=401, detail="autenticação necessária")
         return None
     if credentials is None:
         raise HTTPException(status_code=401, detail="login necessário", headers={"WWW-Authenticate": "Basic"})
@@ -126,7 +157,10 @@ def version():
 
 
 @app.get("/")
-def index(_user: str | None = Depends(require_auth)):
+def index():
+    # Público de propósito — só HTML/JS estático, sem dado sensível. A própria
+    # página checa window.top e redireciona pro Clavis se acessada direto
+    # (fora do iframe). O dado real fica atrás de /comparar (Depends(require_auth)).
     return FileResponse(os.path.join(STATIC, "index.html"))
 
 

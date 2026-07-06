@@ -6,3 +6,4 @@ rapidfuzz
 pandas
 openpyxl
 httpx
+python-jose[cryptography]
