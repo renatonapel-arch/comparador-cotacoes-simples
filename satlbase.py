@@ -8,11 +8,21 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 
 import pyodbc
 from rapidfuzz import fuzz
 
 _ENV_PATH = os.path.join(os.path.expanduser("~"), ".claude", ".env")
+
+
+def _sem_acento(s: str) -> str:
+    """SATLBASE guarda Desc_produto_est sem acentuação (ex: 'AJUSTAVEL', não
+    'AJUSTÁVEL'). A IA extrai o texto do documento COM acento — sem essa
+    normalização, o LIKE do fuzzy match não acha nenhum candidato mesmo
+    quando o produto existe (bug real, provado com CORDÃO AJUSTÁVEL/Marine
+    Sports: LIKE '%AJUSTÁVEL%' = 0 resultados, LIKE '%AJUSTAVEL%' = 3)."""
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 
 def _read_env_var(name: str) -> str:
@@ -36,13 +46,17 @@ def _connect():
 
 def find_fornecedor(nome: str) -> dict | None:
     """Acha Cod_cadastro pelo nome (fuzzy, sem CNPJ). Usa o maior trecho contíguo
-    do nome extraído para evitar LIKE genérico demais (gotcha documentado)."""
+    do nome extraído para evitar LIKE genérico demais (gotcha documentado).
+    Nome_cadastro no SATLBASE é inconsistente quanto a acento (algumas linhas
+    têm, outras não) — busca e comparação sem acento dos dois lados, mesmo
+    fix de match_produto_fuzzy."""
     nome = (nome or "").strip().upper()
     if not nome:
         return None
-    termo = max(nome.split(), key=len) if nome.split() else nome
+    nome_sa = _sem_acento(nome)
+    termo = max(nome_sa.split(), key=len) if nome_sa.split() else nome_sa
     if len(termo) < 4:
-        termo = nome
+        termo = nome_sa
     with _connect() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -55,7 +69,7 @@ def find_fornecedor(nome: str) -> dict | None:
         return None
     melhor = max(
         candidatos,
-        key=lambda r: fuzz.token_set_ratio(nome, (r[1] or "").strip().upper()),
+        key=lambda r: fuzz.token_set_ratio(nome_sa, _sem_acento((r[1] or "").strip().upper())),
     )
     return {"cod_cadastro": melhor[0], "nome_cadastro": (melhor[1] or "").strip()}
 
@@ -115,11 +129,13 @@ def match_produtos(cod_cadastro: int, codigos_forn: list[str]) -> dict[str, str]
 
 
 def match_produto_fuzzy(descricao: str, threshold: float = 0.55) -> dict | None:
-    """Fallback: casa por similaridade de descrição em tbproduto (sem filtro de fornecedor)."""
+    """Fallback: casa por similaridade de descrição em tbproduto (sem filtro de fornecedor).
+    Termo de busca e comparação de score SEM acento — ver _sem_acento()."""
     descricao = (descricao or "").strip().upper()
     if not descricao:
         return None
-    termo = max(descricao.split(), key=len) if descricao.split() else descricao
+    descricao_sa = _sem_acento(descricao)
+    termo = max(descricao_sa.split(), key=len) if descricao_sa.split() else descricao_sa
     with _connect() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -131,7 +147,7 @@ def match_produto_fuzzy(descricao: str, threshold: float = 0.55) -> dict | None:
     if not candidatos:
         return None
     scored = [
-        (r, fuzz.token_set_ratio(descricao, (r[1] or "").strip().upper()) / 100.0)
+        (r, fuzz.token_set_ratio(descricao_sa, _sem_acento((r[1] or "").strip().upper())) / 100.0)
         for r in candidatos
     ]
     melhor, score = max(scored, key=lambda x: x[1])
