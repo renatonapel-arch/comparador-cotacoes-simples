@@ -1,5 +1,15 @@
 # Comparador de Cotações — Versão Simples — CONTINUAR AQUI
 
+> **10/07/2026 — bug corrigido:** fuzzy match não achava produtos cuja
+> descrição extraída pela IA tinha acento (ex: "CORDÃO AJUSTÁVEL") porque o
+> SATLBASE guarda `Desc_produto_est` sem acento ("AJUSTAVEL") — `LIKE
+> '%AJUSTÁVEL%'` retornava 0 candidatos mesmo o produto existindo com
+> histórico de compra real. Provado com a cotação Marine Sports (pedido
+> 197866). Fix: normaliza acento (NFKD) no termo de busca e na comparação de
+> score, em `match_produto_fuzzy()` e `find_fornecedor()`, nos dois backends
+> (`satlbase.py` + `postgres_backend.py`). Deployado e validado em produção.
+> Ver [[reference_satlbase_acesso]] na memória — gotcha reaproveitável.
+>
 > **STATUS (06/07/2026): EM PRODUÇÃO — embutido no Clavis via iframe**
 > (`Compras → Comparador de Cotações`, rota `/compras/comparador-cotacoes`).
 > App standalone em `https://comparador-simples.demos.napel.com.br` —
