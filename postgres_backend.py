@@ -52,6 +52,13 @@ def _ensure_schema() -> None:
             """
             CREATE SCHEMA IF NOT EXISTS comparador_simples;
 
+            -- similaridade de texto por trigramas — pré-filtro do match_produto_fuzzy
+            -- compara a DESCRIÇÃO INTEIRA (não 1 palavra isolada), robusto a prefixo
+            -- de marca/fabricante que a IA extrai do PDF do fornecedor e não existe
+            -- no cadastro do SIGE (ex: "MP-PAPEL..." vs "EC PAPEL...", bug real
+            -- 2026-07-20: produto e histórico existiam, ILIKE '%MP-PAPEL%' = 0 linhas)
+            CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
             CREATE TABLE IF NOT EXISTS comparador_simples.fornecedores (
                 cod_cadastro INTEGER PRIMARY KEY,
                 nome TEXT NOT NULL,
@@ -63,6 +70,8 @@ def _ensure_schema() -> None:
                 descricao TEXT,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+            CREATE INDEX IF NOT EXISTS idx_produtos_descricao_trgm
+                ON comparador_simples.produtos USING GIN (descricao gin_trgm_ops);
 
             CREATE TABLE IF NOT EXISTS comparador_simples.produto_fornecedor (
                 cod_cadastro INTEGER NOT NULL,
@@ -169,16 +178,27 @@ def match_produtos(cod_cadastro: int, codigos_forn: list[str]) -> dict[str, str]
 
 
 def match_produto_fuzzy(descricao: str, threshold: float = 0.55) -> dict | None:
+    """Pré-filtro por similaridade de trigramas (pg_trgm) sobre a DESCRIÇÃO INTEIRA,
+    não uma única palavra "escolhida" — robusto a prefixo de marca/fabricante que a
+    IA extrai do PDF do fornecedor e não existe no cadastro do SIGE. Bug real
+    2026-07-20: "MP-PAPEL FOTO GLOSSY..." (IA, prefixo de marca) vs "EC PAPEL FOTO
+    GLOSSY..." (SIGE) — a escolha antiga (maior palavra = "MP-PAPEL") dava 0
+    candidatos mesmo com produto e histórico existentes."""
     descricao = (descricao or "").strip().upper()
     if not descricao:
         return None
     descricao_sa = _sem_acento(descricao)
-    termo = max(descricao_sa.split(), key=len) if descricao_sa.split() else descricao_sa
     _ensure_schema()
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT cod_produto, descricao FROM comparador_simples.produtos WHERE descricao ILIKE %s LIMIT 50",
-            (f"%{termo}%",),
+            """
+            SELECT cod_produto, descricao
+            FROM comparador_simples.produtos
+            WHERE similarity(descricao, %s) > 0.1
+            ORDER BY similarity(descricao, %s) DESC
+            LIMIT 50
+            """,
+            (descricao_sa, descricao_sa),
         )
         candidatos = cur.fetchall()
     if not candidatos:

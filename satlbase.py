@@ -130,19 +130,23 @@ def match_produtos(cod_cadastro: int, codigos_forn: list[str]) -> dict[str, str]
 
 def match_produto_fuzzy(descricao: str, threshold: float = 0.55) -> dict | None:
     """Fallback: casa por similaridade de descrição em tbproduto (sem filtro de fornecedor).
-    Termo de busca e comparação de score SEM acento — ver _sem_acento()."""
+    Termo de busca e comparação de score SEM acento — ver _sem_acento().
+
+    SEM pré-filtro LIKE de 1 palavra: o SQL Server não tem trigram nativo simples
+    (full-text index em tbproduto seria mexer em tabela de terceiro/SIGE), e
+    escolher "a maior palavra" como termo é frágil — falha quando essa palavra é
+    prefixo de marca/fabricante que a IA extrai do PDF do fornecedor e não existe
+    no cadastro do SIGE (bug real 2026-07-20: "MP-PAPEL FOTO GLOSSY..." vs
+    "EC PAPEL FOTO GLOSSY..." — produto e histórico existiam, LIKE '%MP-PAPEL%'
+    dava 0 candidatos). Roda local (só PC do Renato, sem concorrência) contra
+    ~9k produtos — full-scan em Python é rápido o bastante nesse volume."""
     descricao = (descricao or "").strip().upper()
     if not descricao:
         return None
     descricao_sa = _sem_acento(descricao)
-    termo = max(descricao_sa.split(), key=len) if descricao_sa.split() else descricao_sa
     with _connect() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT TOP 50 Cod_produto, Desc_produto_est FROM tbproduto WITH (NOLOCK) "
-            "WHERE Desc_produto_est LIKE ?",
-            f"%{termo}%",
-        )
+        cur.execute("SELECT Cod_produto, Desc_produto_est FROM tbproduto WITH (NOLOCK)")
         candidatos = cur.fetchall()
     if not candidatos:
         return None
