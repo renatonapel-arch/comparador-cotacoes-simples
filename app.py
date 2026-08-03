@@ -39,7 +39,7 @@ if DB_BACKEND == "postgres":
 else:
     import satlbase as db
 
-APP_VERSION = "v1"
+APP_VERSION = "v2"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(ROOT, "static")
