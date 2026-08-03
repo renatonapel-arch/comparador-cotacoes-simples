@@ -248,9 +248,12 @@ function verdictBadge(linha){
     return `<span class="badge neutro"><svg class="i"><use href="#i-minus"/></svg>sem histórico</span>`;
   }
   const p = Math.round(linha.variacao_pct);
+  const sinal = p > 0 ? '+' : ''; // "flat" também pode ser positivo (ex: +2%, dentro da tolerância) —
+                                   // sem o sinal, "− 2%" (ícone neutro + número) lia como queda quando na
+                                   // real subiu. Ver CONTINUAR-AQUI.md.
   if (linha.verdict === 'up')   return `<span class="badge up"><svg class="i"><use href="#i-up"/></svg>+${p}%</span>`;
   if (linha.verdict === 'down') return `<span class="badge down"><svg class="i"><use href="#i-down"/></svg>${p}%</span>`;
-  return `<span class="badge flat"><svg class="i"><use href="#i-minus"/></svg>${p}%</span>`;
+  return `<span class="badge flat"><svg class="i"><use href="#i-minus"/></svg>${sinal}${p}%</span>`;
 }
 
 function renderResults(data){

@@ -74,6 +74,27 @@ def find_fornecedor(nome: str) -> dict | None:
     return {"cod_cadastro": melhor[0], "nome_cadastro": (melhor[1] or "").strip()}
 
 
+def _variantes_codigo(codigos_forn: list[str]) -> tuple[set[str], dict[str, list[str]]]:
+    """A IA às vezes gruda texto de coluna adjacente no código extraído (ex:
+    documento tem '302010070' e uma coluna 'MA' logo depois — a IA devolve
+    '302010070 MA'). Isso quebra o match exato mesmo quando o SIGE já tem o
+    vínculo certo, e joga pro fuzzy — que erra quando existem produtos
+    parecidos na mesma família (provado com 'papel foto': 5 variantes de
+    grama/acabamento, matou o match certo). Fix determinístico (não depende
+    de prompt de IA acertar sempre): tenta o código como veio E, se tiver
+    espaço, também tenta só o 1º token — sem substituir (códigos legítimos
+    às vezes TÊM espaço, ex: '991 BLACK NOIR')."""
+    variantes: set[str] = set()
+    por_original: dict[str, list[str]] = {}
+    for c in codigos_forn:
+        tentativas = [c]
+        if " " in c:
+            tentativas.append(c.split()[0])
+        por_original[c] = tentativas
+        variantes.update(tentativas)
+    return variantes, por_original
+
+
 def find_fornecedor_por_codigos(codigos_forn: list[str]) -> dict | None:
     """Identifica o fornecedor pelos códigos de item cotados (mais confiável que
     nome fuzzy — o nome extraído pode ser a MARCA, não a razão social cadastrada
@@ -83,9 +104,10 @@ def find_fornecedor_por_codigos(codigos_forn: list[str]) -> dict | None:
     codigos_forn = [c for c in codigos_forn if c]
     if not codigos_forn:
         return None
+    variantes, _ = _variantes_codigo(codigos_forn)
     with _connect() as conn:
         cur = conn.cursor()
-        placeholders = ",".join("?" * len(codigos_forn))
+        placeholders = ",".join("?" * len(variantes))
         cur.execute(
             f"""
             SELECT pf.Cod_cadastro, cg.Nome_cadastro, COUNT(DISTINCT pf.Cod_produto_forn) AS acertos
@@ -95,7 +117,7 @@ def find_fornecedor_por_codigos(codigos_forn: list[str]) -> dict | None:
             GROUP BY pf.Cod_cadastro, cg.Nome_cadastro
             ORDER BY acertos DESC
             """,
-            codigos_forn,
+            list(variantes),
         )
         candidatos = cur.fetchall()
     if not candidatos:
@@ -110,22 +132,29 @@ def find_fornecedor_por_codigos(codigos_forn: list[str]) -> dict | None:
 
 
 def match_produtos(cod_cadastro: int, codigos_forn: list[str]) -> dict[str, str]:
-    """Casa Cod_produto_forn -> Cod_produto via tbProdutoFornecedor (match exato)."""
+    """Casa Cod_produto_forn -> Cod_produto via tbProdutoFornecedor (match exato,
+    com fallback de variante — ver _variantes_codigo)."""
     if not codigos_forn:
         return {}
+    variantes, por_original = _variantes_codigo(codigos_forn)
     with _connect() as conn:
         cur = conn.cursor()
-        placeholders = ",".join("?" * len(codigos_forn))
+        placeholders = ",".join("?" * len(variantes))
         cur.execute(
             f"SELECT Cod_produto, Cod_produto_forn FROM tbProdutoFornecedor WITH (NOLOCK) "
             f"WHERE Cod_cadastro = ? AND Cod_produto_forn IN ({placeholders})",
             cod_cadastro,
-            *codigos_forn,
+            *variantes,
         )
-        return {
-            (r[1] or "").strip(): str(r[0]).strip()
-            for r in cur.fetchall()
-        }
+        achados = {(r[1] or "").strip(): str(r[0]).strip() for r in cur.fetchall()}
+
+    out = {}
+    for original, tentativas in por_original.items():
+        for tentativa in tentativas:
+            if tentativa in achados:
+                out[original] = achados[tentativa]
+                break
+    return out
 
 
 def match_produto_fuzzy(descricao: str, threshold: float = 0.55) -> dict | None:

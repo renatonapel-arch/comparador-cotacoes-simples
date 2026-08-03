@@ -103,10 +103,32 @@ def _ensure_schema() -> None:
     _schema_ready = True
 
 
+def _variantes_codigo(codigos_forn: list[str]) -> tuple[set[str], dict[str, list[str]]]:
+    """A IA às vezes gruda texto de coluna adjacente no código extraído (ex:
+    documento tem '302010070' e uma coluna 'MA' logo depois — a IA devolve
+    '302010070 MA'). Isso quebra o match exato mesmo quando o SIGE já tem o
+    vínculo certo, e joga pro fuzzy — que erra quando existem produtos
+    parecidos na mesma família (provado com 'papel foto': 5 variantes de
+    grama/acabamento, matou o match certo). Fix determinístico (não depende
+    de prompt de IA acertar sempre): tenta o código como veio E, se tiver
+    espaço, também tenta só o 1º token — sem substituir (códigos legítimos
+    às vezes TÊM espaço, ex: '991 BLACK NOIR')."""
+    variantes: set[str] = set()
+    por_original: dict[str, list[str]] = {}
+    for c in codigos_forn:
+        tentativas = [c]
+        if " " in c:
+            tentativas.append(c.split()[0])
+        por_original[c] = tentativas
+        variantes.update(tentativas)
+    return variantes, por_original
+
+
 def find_fornecedor_por_codigos(codigos_forn: list[str]) -> dict | None:
     codigos_forn = [c for c in codigos_forn if c]
     if not codigos_forn:
         return None
+    variantes, _ = _variantes_codigo(codigos_forn)
     _ensure_schema()
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
@@ -118,7 +140,7 @@ def find_fornecedor_por_codigos(codigos_forn: list[str]) -> dict | None:
             GROUP BY pf.cod_cadastro, f.nome
             ORDER BY acertos DESC
             """,
-            (codigos_forn,),
+            (list(variantes),),
         )
         candidatos = cur.fetchall()
     if not candidatos:
@@ -156,6 +178,7 @@ def find_fornecedor(nome: str) -> dict | None:
 def match_produtos(cod_cadastro: int, codigos_forn: list[str]) -> dict[str, str]:
     if not codigos_forn:
         return {}
+    variantes, por_original = _variantes_codigo(codigos_forn)
     _ensure_schema()
     with _connect() as conn, conn.cursor() as cur:
         cur.execute(
@@ -163,9 +186,17 @@ def match_produtos(cod_cadastro: int, codigos_forn: list[str]) -> dict[str, str]
             SELECT cod_produto, cod_produto_forn FROM comparador_simples.produto_fornecedor
             WHERE cod_cadastro = %s AND cod_produto_forn = ANY(%s)
             """,
-            (cod_cadastro, codigos_forn),
+            (cod_cadastro, list(variantes)),
         )
-        return {(forn or "").strip(): (prod or "").strip() for prod, forn in cur.fetchall()}
+        achados = {(forn or "").strip(): (prod or "").strip() for prod, forn in cur.fetchall()}
+
+    out = {}
+    for original, tentativas in por_original.items():
+        for tentativa in tentativas:
+            if tentativa in achados:
+                out[original] = achados[tentativa]
+                break
+    return out
 
 
 def match_produto_fuzzy(descricao: str, threshold: float = 0.55) -> dict | None:
