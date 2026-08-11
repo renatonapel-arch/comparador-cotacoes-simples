@@ -107,6 +107,26 @@ def coletar_produtos(cur) -> list[dict]:
     return [{"cod_produto": p, "descricao": (d or "").strip()} for p, d in cur.fetchall()]
 
 
+def coletar_fornecedor_produto_ec(cur, meses: int = 24) -> list[dict]:
+    """Pares (produto, fornecedor) com compra canônica EC — base da votação de
+    fornecedor por itens no app. Só EC: sem esse filtro, ajustes internos (AJE
+    lançados por funcionário, DBADMIN) entrariam como 'fornecedor'."""
+    cur.execute(
+        f"""
+        SELECT DISTINCT LTRIM(RTRIM(i.Cod_produto)), e.Cod_cli_for
+        FROM tbentradasitem i WITH (NOLOCK)
+        INNER JOIN tbentradas e WITH (NOLOCK) ON e.Chave_fato = i.Chave_fato
+        WHERE e.Cod_docto = 'EC'
+          AND e.Data_movto >= DATEADD(month, -{meses}, GETDATE())
+          AND i.Cod_produto IS NOT NULL AND LTRIM(RTRIM(i.Cod_produto)) <> ''
+        """
+    )
+    return [
+        {"cod_produto": p, "cod_cadastro": int(c)}
+        for p, c in cur.fetchall()
+    ]
+
+
 def coletar_fornecedores(cur, cods_cadastro: set[int]) -> list[dict]:
     if not cods_cadastro:
         return []
@@ -129,12 +149,13 @@ def main():
         compras_historico = coletar_compras_historico(cur)
         produto_fornecedor = coletar_produto_fornecedor(cur)
         produtos = coletar_produtos(cur)
+        fornecedor_produto_ec = coletar_fornecedor_produto_ec(cur)
         cods_cadastro = {c["cod_cadastro"] for c in compras_historico} | {c["cod_cadastro"] for c in produto_fornecedor}
         fornecedores = coletar_fornecedores(cur, cods_cadastro)
 
         logger.info(
-            "coletado: %d compras_historico, %d produto_fornecedor, %d produtos, %d fornecedores",
-            len(compras_historico), len(produto_fornecedor), len(produtos), len(fornecedores),
+            "coletado: %d compras_historico, %d produto_fornecedor, %d produtos, %d fornecedores, %d fornecedor_produto_ec",
+            len(compras_historico), len(produto_fornecedor), len(produtos), len(fornecedores), len(fornecedor_produto_ec),
         )
 
         payload = {
@@ -143,6 +164,7 @@ def main():
             "produtos": produtos,
             "produto_fornecedor": produto_fornecedor,
             "compras_historico": compras_historico,
+            "fornecedor_produto_ec": fornecedor_produto_ec,
         }
 
         url = envvar("COMPARADOR_SIMPLES_URL").rstrip("/") + "/admin/sync-historico"

@@ -27,17 +27,25 @@ _MIME_BY_EXT = {
     "webp": "image/webp",
 }
 
-PROMPT = """Você recebe a COTAÇÃO enviada por um fornecedor (pode ser PDF, foto,
-print de e-mail/WhatsApp, ou texto colado). Extraia os dados e responda APENAS
-um JSON válido (sem texto antes ou depois, sem ```), com EXATAMENTE estas chaves:
+PROMPT = """Você recebe a COTAÇÃO/PROPOSTA enviada por um fornecedor para a
+NAPEL NACIONAL PECAS LTDA (CNPJ 07.686.857/0001-56). Pode ser PDF, foto, print
+de e-mail/WhatsApp, ou texto colado. Extraia os dados e responda APENAS um JSON
+válido (sem texto antes ou depois, sem ```), com EXATAMENTE estas chaves:
 
 {
-  "fornecedor_nome": "razão social ou nome do fornecedor — string ou null. Se o \
-nome não aparecer no texto, procure em logos/marcas/imagens do documento.",
+  "fornecedor_nome": "quem está VENDENDO — string ou null. ATENÇÃO: 'NAPEL \
+NACIONAL PECAS' é o COMPRADOR (cliente/destinatário do documento) — NUNCA \
+retorne NAPEL como fornecedor. O nome do fornecedor geralmente está no topo do \
+documento, na LOGO/marca gráfica, no domínio do e-mail de contato, ou no rodapé. \
+Se o nome só aparecer como logo/imagem, leia o texto da logo. Se não conseguir \
+identificar, use null (não chute).",
   "itens": [
     {
-      "codigo": "código do produto no fornecedor, como aparece no documento — string",
-      "descricao": "descrição do item — string",
+      "codigo": "código do produto no fornecedor, EXATAMENTE como aparece na \
+coluna de código — string. Só o código: não inclua texto de colunas vizinhas.",
+      "descricao": "descrição do item — SOMENTE o nome do produto. Não inclua \
+valores de impostos (ignore linhas tipo 'Vr. ICMS ST: R$ ...'), nem código, \
+nem quantidade, nem preço.",
       "qtde_cotada": número (quantidade cotada, na unidade de venda do fornecedor — ex: 6 caixas),
       "unidade_venda": "unidade em que o fornecedor vende — ex: CX, FD, UN, KG — string ou null",
       "valor_unitario_documento": número (valor unitário EXATAMENTE como está no documento, \

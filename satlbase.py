@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 import unicodedata
 
 import pyodbc
 from rapidfuzz import fuzz
 
 _ENV_PATH = os.path.join(os.path.expanduser("~"), ".claude", ".env")
+_VINCULOS_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vinculos_aprendidos.db")
 
 
 def _sem_acento(s: str) -> str:
@@ -281,3 +283,160 @@ def descricao_produto(cods_produto: list[str]) -> dict[str, str]:
             *cods_produto,
         )
         return {str(r[0]).strip(): (r[1] or "").strip() for r in cur.fetchall()}
+
+
+def catalogo_produtos() -> list[tuple[str, str]]:
+    """Catálogo completo (cod, descricao) — ~9k linhas, usado pra votação de
+    fornecedor e fuzzy local."""
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT Cod_produto, Desc_produto_est FROM tbproduto WITH (NOLOCK)")
+        return [(str(r[0]).strip(), (r[1] or "").strip()) for r in cur.fetchall()]
+
+
+def nome_cadastro(cod_cadastro: int) -> str:
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT Nome_cadastro FROM tbCadastroGeral WITH (NOLOCK) WHERE Cod_cadastro = ?", cod_cadastro)
+        r = cur.fetchone()
+        return (str(r[0]).strip() if r and r[0] else "")
+
+
+def produtos_historico_fornecedor(cod_cadastro: int, limite: int = 200) -> list[dict]:
+    """Produtos que a Napel JÁ COMPROU desse fornecedor (qualquer tipo de doc de
+    entrada — mesma razão do caso 108680/AJE). São os candidatos do matching por
+    IA: lista pequena e de alta precisão, no vocabulário do catálogo."""
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT TOP (?) i.Cod_produto, MAX(p.Desc_produto_est) AS descricao
+            FROM tbentradasitem i WITH (NOLOCK)
+            INNER JOIN tbentradas e WITH (NOLOCK) ON e.Chave_fato = i.Chave_fato
+            LEFT JOIN tbproduto p WITH (NOLOCK) ON p.Cod_produto = i.Cod_produto
+            WHERE e.Cod_cli_for = ?
+            GROUP BY i.Cod_produto
+            """,
+            limite,
+            cod_cadastro,
+        )
+        return [
+            {"cod_produto": str(r[0]).strip(), "descricao": (r[1] or "").strip()}
+            for r in cur.fetchall()
+            if (r[1] or "").strip()
+        ]
+
+
+def fornecedores_de_produtos(cods_produto: list[str]) -> dict[str, set[int]]:
+    """cod_produto -> fornecedores que VENDERAM esse produto pra Napel — só
+    Cod_docto='EC' (compra canônica). Sem esse filtro, ajustes internos (AJE
+    lançados por funcionário, DBADMIN etc.) entram como 'fornecedor' e poluem
+    a votação (visto em teste real: DBADMIN/Hudson venciam a 3F)."""
+    if not cods_produto:
+        return {}
+    with _connect() as conn:
+        cur = conn.cursor()
+        placeholders = ",".join("?" * len(cods_produto))
+        cur.execute(
+            f"""
+            SELECT DISTINCT i.Cod_produto, e.Cod_cli_for
+            FROM tbentradasitem i WITH (NOLOCK)
+            INNER JOIN tbentradas e WITH (NOLOCK) ON e.Chave_fato = i.Chave_fato
+            WHERE e.Cod_docto = 'EC' AND i.Cod_produto IN ({placeholders})
+            """,
+            *cods_produto,
+        )
+        out: dict[str, set[int]] = {}
+        for cod_produto, cod_cli_for in cur.fetchall():
+            out.setdefault(str(cod_produto).strip(), set()).add(int(cod_cli_for))
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Vínculos aprendidos (local: SQLite no diretório do projeto)
+# Matches confirmados por evidência forte (IA sobre histórico do fornecedor,
+# confiança alta) viram vínculo persistente — a próxima cotação do mesmo
+# fornecedor resolve por código, instantâneo e sem IA. Fuzzy NUNCA é gravado
+# (não perpetua erro).
+# ---------------------------------------------------------------------------
+
+def _vinculos_conn():
+    conn = sqlite3.connect(_VINCULOS_DB)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vinculos_aprendidos (
+            cod_cadastro INTEGER NOT NULL,
+            cod_produto_forn TEXT NOT NULL,
+            cod_produto TEXT NOT NULL,
+            fonte TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (cod_cadastro, cod_produto_forn)
+        )
+        """
+    )
+    return conn
+
+
+def vinculos_aprendidos_get(cod_cadastro: int, codigos_forn: list[str]) -> dict[str, str]:
+    if not codigos_forn:
+        return {}
+    variantes, por_original = _variantes_codigo(codigos_forn)
+    with _vinculos_conn() as conn:
+        placeholders = ",".join("?" * len(variantes))
+        rows = conn.execute(
+            f"SELECT cod_produto_forn, cod_produto FROM vinculos_aprendidos "
+            f"WHERE cod_cadastro = ? AND cod_produto_forn IN ({placeholders})",
+            [cod_cadastro, *variantes],
+        ).fetchall()
+    achados = {r[0]: r[1] for r in rows}
+    out = {}
+    for original, tentativas in por_original.items():
+        for tentativa in tentativas:
+            if tentativa in achados:
+                out[original] = achados[tentativa]
+                break
+    return out
+
+
+def vinculos_aprendidos_put(cod_cadastro: int, mapeamentos: list[tuple[str, str, str]]) -> None:
+    """mapeamentos: [(cod_produto_forn, cod_produto, fonte)]"""
+    if not mapeamentos:
+        return
+    with _vinculos_conn() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO vinculos_aprendidos "
+            "(cod_cadastro, cod_produto_forn, cod_produto, fonte, updated_at) "
+            "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+            [(cod_cadastro, c, p, f) for c, p, f in mapeamentos],
+        )
+
+
+def fornecedor_por_vinculos_aprendidos(codigos_forn: list[str]) -> dict | None:
+    """Mesma votação do find_fornecedor_por_codigos, mas sobre a tabela de
+    vínculos aprendidos — cobre fornecedor cujos códigos não existem em
+    tbProdutoFornecedor mas já foram aprendidos em cotação anterior."""
+    codigos_forn = [c for c in codigos_forn if c]
+    if not codigos_forn:
+        return None
+    variantes, _ = _variantes_codigo(codigos_forn)
+    with _vinculos_conn() as conn:
+        placeholders = ",".join("?" * len(variantes))
+        rows = conn.execute(
+            f"SELECT cod_cadastro, COUNT(DISTINCT cod_produto_forn) FROM vinculos_aprendidos "
+            f"WHERE cod_produto_forn IN ({placeholders}) GROUP BY cod_cadastro "
+            f"ORDER BY 2 DESC",
+            list(variantes),
+        ).fetchall()
+    if not rows:
+        return None
+    cod_cadastro, acertos = rows[0]
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT Nome_cadastro FROM tbCadastroGeral WITH (NOLOCK) WHERE Cod_cadastro = ?", cod_cadastro)
+        r = cur.fetchone()
+    return {
+        "cod_cadastro": int(cod_cadastro),
+        "nome_cadastro": (str(r[0]).strip() if r else ""),
+        "acertos": int(acertos),
+        "total_itens": len(codigos_forn),
+    }

@@ -106,6 +106,27 @@ def _ensure_schema() -> None:
                 status TEXT,
                 error TEXT
             );
+
+            -- (produto, fornecedor) com compra canônica EC — base da votação de
+            -- fornecedor por itens. Sem o filtro EC, ajustes internos (AJE por
+            -- funcionário, DBADMIN) poluem a votação.
+            CREATE TABLE IF NOT EXISTS comparador_simples.fornecedor_produto_ec (
+                cod_produto TEXT NOT NULL,
+                cod_cadastro INTEGER NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (cod_produto, cod_cadastro)
+            );
+
+            -- Vínculos codigo-do-fornecedor -> produto aprendidos por evidência
+            -- forte (IA sobre histórico, confiança alta). Fuzzy NUNCA entra aqui.
+            CREATE TABLE IF NOT EXISTS comparador_simples.vinculos_aprendidos (
+                cod_cadastro INTEGER NOT NULL,
+                cod_produto_forn TEXT NOT NULL,
+                cod_produto TEXT NOT NULL,
+                fonte TEXT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (cod_cadastro, cod_produto_forn)
+            );
             """
         )
         conn.commit()
@@ -327,6 +348,134 @@ def descricao_produto(cods_produto: list[str]) -> dict[str, str]:
         return {r[0]: (r[1] or "").strip() for r in cur.fetchall()}
 
 
+def catalogo_produtos() -> list[tuple[str, str]]:
+    """Catálogo completo (cod, descricao) — usado pra votação de fornecedor."""
+    _ensure_schema()
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT cod_produto, descricao FROM comparador_simples.produtos")
+        return [(r[0], (r[1] or "").strip()) for r in cur.fetchall()]
+
+
+def nome_cadastro(cod_cadastro: int) -> str:
+    _ensure_schema()
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT nome FROM comparador_simples.fornecedores WHERE cod_cadastro = %s", (cod_cadastro,))
+        r = cur.fetchone()
+        return (r[0] or "").strip() if r else ""
+
+
+def produtos_historico_fornecedor(cod_cadastro: int, limite: int = 200) -> list[dict]:
+    """Produtos que a Napel JÁ COMPROU desse fornecedor — candidatos do matching
+    por IA (lista pequena, vocabulário do catálogo)."""
+    _ensure_schema()
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT ch.cod_produto, COALESCE(p.descricao, '') AS descricao
+            FROM (SELECT DISTINCT cod_produto FROM comparador_simples.compras_historico
+                  WHERE cod_cadastro = %s) ch
+            LEFT JOIN comparador_simples.produtos p ON p.cod_produto = ch.cod_produto
+            LIMIT %s
+            """,
+            (cod_cadastro, limite),
+        )
+        return [
+            {"cod_produto": r[0], "descricao": (r[1] or "").strip()}
+            for r in cur.fetchall()
+            if (r[1] or "").strip()
+        ]
+
+
+def fornecedores_de_produtos(cods_produto: list[str]) -> dict[str, set[int]]:
+    """cod_produto -> fornecedores com compra EC (canônica) — ver comentário da
+    tabela fornecedor_produto_ec."""
+    if not cods_produto:
+        return {}
+    _ensure_schema()
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT cod_produto, cod_cadastro FROM comparador_simples.fornecedor_produto_ec "
+            "WHERE cod_produto = ANY(%s)",
+            (cods_produto,),
+        )
+        out: dict[str, set[int]] = {}
+        for cod_produto, cod_cadastro in cur.fetchall():
+            out.setdefault(cod_produto, set()).add(int(cod_cadastro))
+        return out
+
+
+def vinculos_aprendidos_get(cod_cadastro: int, codigos_forn: list[str]) -> dict[str, str]:
+    if not codigos_forn:
+        return {}
+    variantes, por_original = _variantes_codigo(codigos_forn)
+    _ensure_schema()
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT cod_produto_forn, cod_produto FROM comparador_simples.vinculos_aprendidos "
+            "WHERE cod_cadastro = %s AND cod_produto_forn = ANY(%s)",
+            (cod_cadastro, list(variantes)),
+        )
+        achados = {r[0]: r[1] for r in cur.fetchall()}
+    out = {}
+    for original, tentativas in por_original.items():
+        for tentativa in tentativas:
+            if tentativa in achados:
+                out[original] = achados[tentativa]
+                break
+    return out
+
+
+def vinculos_aprendidos_put(cod_cadastro: int, mapeamentos: list[tuple[str, str, str]]) -> None:
+    """mapeamentos: [(cod_produto_forn, cod_produto, fonte)]"""
+    if not mapeamentos:
+        return
+    _ensure_schema()
+    with _connect() as conn, conn.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO comparador_simples.vinculos_aprendidos
+                (cod_cadastro, cod_produto_forn, cod_produto, fonte, updated_at)
+            VALUES %s
+            ON CONFLICT (cod_cadastro, cod_produto_forn) DO UPDATE SET
+                cod_produto = EXCLUDED.cod_produto, fonte = EXCLUDED.fonte, updated_at = now()
+            """,
+            [(cod_cadastro, c, p, f) for c, p, f in mapeamentos],
+            template="(%s, %s, %s, %s, now())",
+        )
+        conn.commit()
+
+
+def fornecedor_por_vinculos_aprendidos(codigos_forn: list[str]) -> dict | None:
+    codigos_forn = [c for c in codigos_forn if c]
+    if not codigos_forn:
+        return None
+    variantes, _ = _variantes_codigo(codigos_forn)
+    _ensure_schema()
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT va.cod_cadastro, f.nome, COUNT(DISTINCT va.cod_produto_forn) AS acertos
+            FROM comparador_simples.vinculos_aprendidos va
+            LEFT JOIN comparador_simples.fornecedores f ON f.cod_cadastro = va.cod_cadastro
+            WHERE va.cod_produto_forn = ANY(%s)
+            GROUP BY va.cod_cadastro, f.nome
+            ORDER BY acertos DESC
+            """,
+            (list(variantes),),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    cod_cadastro, nome, acertos = rows[0]
+    return {
+        "cod_cadastro": int(cod_cadastro),
+        "nome_cadastro": (nome or "").strip(),
+        "acertos": int(acertos),
+        "total_itens": len(codigos_forn),
+    }
+
+
 def sync_upsert(payload: dict) -> dict:
     """Recebe o payload do sync_comparador_simples.py e faz upsert em massa.
     payload = {source, fornecedores, produtos, produto_fornecedor, compras_historico}
@@ -400,6 +549,21 @@ def sync_upsert(payload: dict) -> dict:
             )
             rows_upserted += len(compras_historico)
 
+        fornecedor_produto_ec = payload.get("fornecedor_produto_ec") or []
+        if fornecedor_produto_ec:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO comparador_simples.fornecedor_produto_ec
+                    (cod_produto, cod_cadastro, updated_at)
+                VALUES %s
+                ON CONFLICT (cod_produto, cod_cadastro) DO UPDATE SET updated_at = now()
+                """,
+                [(p["cod_produto"], p["cod_cadastro"]) for p in fornecedor_produto_ec],
+                template="(%s, %s, now())",
+            )
+            rows_upserted += len(fornecedor_produto_ec)
+
         cur.execute(
             """
             INSERT INTO comparador_simples.sync_log
@@ -408,7 +572,8 @@ def sync_upsert(payload: dict) -> dict:
             """,
             (
                 payload.get("source", "desconhecido"),
-                len(fornecedores) + len(produtos) + len(produto_fornecedor) + len(compras_historico),
+                len(fornecedores) + len(produtos) + len(produto_fornecedor)
+                + len(compras_historico) + len(fornecedor_produto_ec),
                 rows_upserted,
             ),
         )

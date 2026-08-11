@@ -266,8 +266,11 @@ function renderResults(data){
 
   const tbody = document.getElementById('resultBody');
   tbody.innerHTML = data.linhas.map(r=>{
+    const chipRevisar = r.revisar
+      ? ` <span class="badge flat" title="Vínculo por similaridade de texto — confira se é o mesmo produto antes de decidir">revisar</span>`
+      : '';
     return `<tr>
-      <td class="font-semibold text-[var(--navy-900)]">${r.produto}</td>
+      <td class="font-semibold text-[var(--navy-900)]">${r.produto}${chipRevisar}</td>
       <td>${brl(r.ultima)}</td>
       <td>${brl(r.atual)}</td>
       <td>${verdictBadge(r)}</td>
