@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements-prod.txt .
 RUN pip install --no-cache-dir -r requirements-prod.txt
 
-COPY app.py postgres_backend.py extracao.py ./
+COPY app.py postgres_backend.py extracao.py matching.py ./
 COPY static ./static
 
 ENV COMPARADOR_DB=postgres
