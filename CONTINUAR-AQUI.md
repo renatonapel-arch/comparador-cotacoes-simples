@@ -1,5 +1,32 @@
 # Comparador de Cotações — Versão Simples — CONTINUAR AQUI
 
+> **11/08/2026 — v3: matching em camadas com IA + vínculos aprendidos.**
+> Causa raiz (proposta 1020, 3F Auto Peças — todos os itens JÁ comprados da
+> própria 3F): (1) fornecedor só na logo → IA devolvia o nome do CLIENTE
+> (NAPEL) e o app aceitava; (2) códigos da 3F sem vínculo em
+> tbProdutoFornecedor; (3) fuzzy no catálogo inteiro não cruza vocabulário
+> de fornecedor vs catálogo (JUMELO=ALGEMA, KIT REPARO=REP COMPL,
+> CURRIER=COURIER) e casava produto ERRADO da mesma família.
+>
+> Arquitetura v3 (tudo em camadas, evidência forte primeiro):
+> - **Fornecedor:** código em tbProdutoFornecedor → vínculo aprendido →
+>   votação pelos itens (top-K produtos parecidos no catálogo → quem já
+>   vendeu via compra **EC** — sem esse filtro, AJE de funcionário/DBADMIN
+>   polui) confirmada por IA contra o histórico → nome (com guard: NAPEL
+>   nunca é fornecedor, é o cliente).
+> - **Produto:** código exato → vínculo aprendido → **IA (Gemini) escolhendo
+>   entre os produtos JÁ COMPRADOS desse fornecedor** (lista pequena =
+>   precisão alta; validado 3/3 no caso 3F) → fuzzy catálogo inteiro só como
+>   último recurso (threshold 0.80, badge "revisar" na UI, nunca persiste).
+> - **Vínculos aprendidos** (`comparador_simples.vinculos_aprendidos` em prod,
+>   `vinculos_aprendidos.db` SQLite local): match IA confiança alta grava
+>   código_fornecedor→produto — próxima cotação resolve instantânea sem IA.
+> - **Sync:** novo dataset `fornecedor_produto_ec` (pares produto×fornecedor
+>   com compra EC) — base da votação em produção. Rodar resync após deploy.
+>
+> Bônus: Marine agora resolve ISCA INNA (antes "sem histórico") e sobreviveu
+> ao recadastro dos vínculos no SIGE (códigos curtos viraram EAN em ago/2026).
+>
 > **10/07/2026 — bug corrigido:** fuzzy match não achava produtos cuja
 > descrição extraída pela IA tinha acento (ex: "CORDÃO AJUSTÁVEL") porque o
 > SATLBASE guarda `Desc_produto_est` sem acento ("AJUSTAVEL") — `LIKE
