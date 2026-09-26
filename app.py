@@ -229,7 +229,7 @@ def index():
     # Público de propósito — só HTML/JS estático, sem dado sensível. A própria
     # página checa window.top e redireciona pro Clavis se acessada direto
     # (fora do iframe). O dado real fica atrás de /comparar (Depends(require_auth)).
-    return FileResponse(os.path.join(STATIC, "index.html"))
+    return FileResponse(os.path.join(STATIC, "index.html"), headers={"Cache-Control": "no-cache"})
 
 
 @app.post("/comparar")
