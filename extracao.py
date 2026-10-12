@@ -72,6 +72,56 @@ def _mime_from_filename(filename: str) -> str:
     return _MIME_BY_EXT.get(ext, "application/octet-stream")
 
 
+def _porteiro_key() -> str:
+    return os.environ.get("PORTEIRO_API_KEY", "").strip()
+
+
+def porteiro_ativo() -> bool:
+    return bool(_porteiro_key())
+
+
+def _chamar_porteiro(content: list[dict], modelo: str) -> dict:
+    """Porteiro IA (OpenAI-compativel). `visao` p/ PDF/imagem, `texto-rapido` p/ texto."""
+    base = os.environ.get("PORTEIRO_BASE_URL", "https://porteiro.demos.napel.com.br/v1").rstrip("/")
+    body = {
+        "model": modelo,
+        "temperature": 0,
+        "max_tokens": 8192,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "user", "content": content}],
+    }
+    with httpx.Client(timeout=120.0) as client:
+        r = client.post(
+            f"{base}/chat/completions",
+            json=body,
+            headers={"Authorization": f"Bearer {_porteiro_key()}"},
+        )
+    if r.status_code != 200:
+        logger.warning("Porteiro HTTP %s: %s", r.status_code, r.text[:300])
+        return {"_erro": f"porteiro_http_{r.status_code}"}
+    try:
+        raw = (r.json()["choices"][0]["message"]["content"] or "").strip()
+    except Exception:
+        return {"_erro": "sem_candidato"}
+    return _parse_json(raw)
+
+
+def _parse_json(raw: str) -> dict:
+    d = None
+    try:
+        d = json.loads(raw)
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.S)
+        if m:
+            try:
+                d = json.loads(m.group(0))
+            except Exception:
+                d = None
+    if not isinstance(d, dict):
+        return {"_erro": "json_invalido", "_raw": raw[:600]}
+    return d
+
+
 def _chamar_gemini(parts: list[dict], api_key: str) -> dict:
     body = {
         "contents": [{"parts": parts}],
@@ -95,22 +145,13 @@ def _chamar_gemini(parts: list[dict], api_key: str) -> dict:
     partes = ((cands[0].get("content") or {}).get("parts")) or []
     raw = "".join(p.get("text", "") for p in partes).strip()
 
-    d = None
-    try:
-        d = json.loads(raw)
-    except Exception:
-        m = re.search(r"\{.*\}", raw, re.S)
-        if m:
-            try:
-                d = json.loads(m.group(0))
-            except Exception:
-                d = None
-    if not isinstance(d, dict):
-        return {"_erro": "json_invalido", "_raw": raw[:600]}
-    return d
+    return _parse_json(raw)
 
 
 def extrair_de_texto(texto: str, api_key: str) -> dict:
+    if porteiro_ativo():
+        txt = f"{PROMPT}\n\nCOTAÇÃO (texto colado):\n{texto}"
+        return _chamar_porteiro([{"type": "text", "text": txt}], "texto-rapido")
     parts = [{"text": PROMPT}, {"text": f"\n\nCOTAÇÃO (texto colado):\n{texto}"}]
     return _chamar_gemini(parts, api_key)
 
@@ -119,6 +160,13 @@ def extrair_de_arquivo(conteudo: bytes, filename: str, api_key: str) -> dict:
     mime = _mime_from_filename(filename)
     if mime == "application/octet-stream":
         return {"_erro": f"tipo_arquivo_nao_suportado:{filename}"}
+    if porteiro_ativo():
+        data_uri = f"data:{mime};base64,{base64.b64encode(conteudo).decode()}"
+        if mime == "application/pdf":
+            anexo = {"type": "file", "file": {"file_data": data_uri, "filename": filename}}
+        else:
+            anexo = {"type": "image_url", "image_url": {"url": data_uri}}
+        return _chamar_porteiro([anexo, {"type": "text", "text": PROMPT}], "visao")
     parts = [
         {"inline_data": {"mime_type": mime, "data": base64.b64encode(conteudo).decode()}},
         {"text": PROMPT},
@@ -128,5 +176,8 @@ def extrair_de_arquivo(conteudo: bytes, filename: str, api_key: str) -> dict:
 
 def extrair_de_planilha(texto_tabular: str, api_key: str) -> dict:
     """Planilha (XLSX/CSV) já convertida em texto tabular (ver app.py)."""
+    if porteiro_ativo():
+        txt = f"{PROMPT}\n\nCOTAÇÃO (planilha, convertida em texto):\n{texto_tabular}"
+        return _chamar_porteiro([{"type": "text", "text": txt}], "texto-rapido")
     parts = [{"text": PROMPT}, {"text": f"\n\nCOTAÇÃO (planilha, convertida em texto):\n{texto_tabular}"}]
     return _chamar_gemini(parts, api_key)
