@@ -178,7 +178,7 @@ async def comparar(
     _user: str | None = Depends(require_auth),
 ):
     api_key = _api_key()
-    if not api_key:
+    if not api_key and not extracao.porteiro_ativo():
         return JSONResponse({"erro": "GEMINI_API_KEY não configurada"}, status_code=500)
 
     if modo == "arquivo":
